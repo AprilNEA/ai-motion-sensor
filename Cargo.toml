@@ -1,0 +1,31 @@
+[package]
+name = "ai-motion-sensor"
+version = "0.1.0"
+edition = "2021"
+description = "AI-powered motion sensor with exit intent detection for Apple Silicon"
+
+[dependencies]
+# ONNX Runtime inference engine
+ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
+ndarray = "0.17"
+
+# Image processing
+image = "0.25"
+
+# Linear algebra (Kalman filter)
+nalgebra = "0.33"
+
+# Serialization & configuration
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

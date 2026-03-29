@@ -1,0 +1,60 @@
+# AI Motion Sensor Configuration
+
+[models]
+yolo_path = "models/yolo11s.onnx"
+scrfd_path = "models/scrfd_10g.onnx"
+arcface_path = "models/w600k_r50.onnx"
+
+[detection]
+# YOLO confidence threshold
+confidence = 0.5
+# NMS IoU threshold
+nms_iou = 0.45
+# Only detect person class (COCO class 0)
+person_only = true
+# Input resolution
+input_size = 640
+
+[face]
+# Enable face recognition pipeline
+enabled = true
+# Face detection confidence threshold
+detection_confidence = 0.5
+# Cosine similarity threshold for face matching
+match_threshold = 0.4
+
+[tracking]
+# ByteTrack high confidence threshold
+high_thresh = 0.5
+# ByteTrack low confidence threshold
+low_thresh = 0.1
+# Threshold for creating new tracks
+new_track_thresh = 0.6
+# IoU threshold for matching
+match_iou = 0.8
+# Frames before removing a lost track
+max_lost = 30
+
+[intent]
+# Minimum score to trigger exit intent alert
+alert_threshold = 0.65
+# Number of consecutive frames required to confirm intent
+confirm_frames = 15
+# Fraction of confirm_frames that must exceed threshold
+confirm_ratio = 0.8
+# Maximum trajectory length (frames) to keep per person
+trajectory_length = 90
+
+[intent.weights]
+direction = 0.30
+distance = 0.25
+in_zone = 0.20
+facing = 0.15
+walking = 0.10
+
+# Define one or more door zones as polygons (normalized 0..1 coordinates).
+# The `direction` vector points from inside toward outside.
+[[door_zones]]
+name = "front_door"
+polygon = [[0.3471, 0.3697], [0.3278, 0.0065], [0.4439, 0.0065], [0.4514, 0.4299]]
+direction = [0.115, -0.9934]
