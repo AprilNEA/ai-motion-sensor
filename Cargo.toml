@@ -6,7 +6,7 @@ description = "AI-powered motion sensor with exit intent detection for Apple Sil
 
 [dependencies]
 # ONNX Runtime inference engine
-ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
+ort = { version = "2.0.0-rc.12", features = ["ndarray", "coreml"] }
 ndarray = "0.17"
 
 # Video decoding (in-process, no subprocess pipes)
