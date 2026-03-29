@@ -23,6 +23,9 @@ pub struct Pipeline {
     door_zones: Vec<DoorZone>,
     face_db: FaceDatabase,
     frame_count: u64,
+    detect_interval: u64,
+    max_input_dim: u32,
+    fps: f64,
 }
 
 /// Summary returned after processing a single frame.
@@ -51,10 +54,14 @@ impl Pipeline {
         let scorer = ExitIntentScorer::new(config.intent.clone());
         let door_zones = config.door_zones();
         let face_db = FaceDatabase::new(config.face.match_threshold);
+        let detect_interval = config.detection.detect_interval.max(1);
+        let max_input_dim = config.detection.max_input_dim;
 
         tracing::info!(
             doors = door_zones.len(),
             face_enabled = config.face.enabled,
+            detect_interval,
+            max_input_dim,
             "pipeline ready"
         );
 
@@ -67,6 +74,9 @@ impl Pipeline {
             door_zones,
             face_db,
             frame_count: 0,
+            detect_interval,
+            max_input_dim,
+            fps: 30.0, // updated in run()
         })
     }
 
@@ -76,28 +86,57 @@ impl Pipeline {
         let timestamp = self.frame_count as f64;
         let (img_w, img_h) = image.dimensions();
 
-        // ---- 1. Person detection ----
-        let detections = self.yolo.detect(image)?;
-        tracing::debug!(frame = self.frame_count, persons = detections.len());
+        // ---- 0. Downscale if configured ----
+        let image = if self.max_input_dim > 0 {
+            let max_dim = img_w.max(img_h);
+            if max_dim > self.max_input_dim {
+                let scale = self.max_input_dim as f32 / max_dim as f32;
+                let new_w = (img_w as f32 * scale) as u32;
+                let new_h = (img_h as f32 * scale) as u32;
+                image.resize_exact(new_w, new_h, image::imageops::FilterType::Triangle)
+            } else {
+                image.clone()
+            }
+        } else {
+            image.clone()
+        };
+        let (proc_w, proc_h) = image.dimensions();
+
+        // ---- 1. Detection (every N frames) or prediction-only ----
+        let is_detect_frame = self.frame_count % self.detect_interval == 0
+            || self.frame_count <= 2; // always detect first frames
+
+        let detections = if is_detect_frame {
+            self.yolo.detect(&image)?
+        } else {
+            Vec::new()
+        };
 
         // ---- 2. Tracking ----
-        let _tracks = self.tracker.update(&detections, timestamp);
+        if is_detect_frame {
+            self.tracker.update(&detections, timestamp);
+        } else {
+            // Predict-only: advance Kalman filters without new measurements.
+            self.tracker.predict_only();
+        }
 
-        // ---- 3. Optional face recognition ----
-        if self.frame_count % 5 == 0 {
-            self.run_face_recognition(image, img_w, img_h);
+        // ---- 3. Optional face recognition (on detect frames only) ----
+        if is_detect_frame && self.frame_count % (self.detect_interval * 5) == 0 {
+            self.run_face_recognition(&image, proc_w, proc_h);
         }
 
         // ---- 4 & 5. Spatial analysis + intent scoring ----
-        let alerts = self.run_intent_analysis(img_w, img_h);
+        let alerts = self.run_intent_analysis(proc_w, proc_h);
 
         // Prune stale history.
         let active_ids: Vec<u64> = self.tracker.active_tracks().map(|t| t.id).collect();
         self.scorer.prune(&active_ids);
 
+        let num_persons = self.tracker.active_tracks().count();
+
         Ok(FrameResult {
             frame_id: self.frame_count,
-            num_persons: detections.len(),
+            num_persons,
             alerts,
         })
     }
@@ -109,8 +148,8 @@ impl Pipeline {
 
     /// Run the full pipeline on a video source until it is exhausted.
     pub fn run(&mut self, source: &mut dyn FrameSource) -> Result<()> {
-        let fps = source.fps();
-        tracing::info!(fps, "starting pipeline loop");
+        self.fps = source.fps();
+        tracing::info!(fps = self.fps, "starting pipeline loop");
 
         loop {
             let frame = source.next_frame()?;
@@ -121,13 +160,15 @@ impl Pipeline {
             let result = self.process_frame(&image)?;
             if !result.alerts.is_empty() {
                 for alert in &result.alerts {
-                    tracing::warn!(
-                        frame = result.frame_id,
-                        track = alert.track_id,
-                        score = format!("{:.2}", alert.score),
-                        door = ?alert.door_name,
-                        "ALERT"
-                    );
+                    if alert.alert {
+                        tracing::warn!(
+                            frame = result.frame_id,
+                            track = alert.track_id,
+                            score = format!("{:.2}", alert.score),
+                            door = ?alert.door_name,
+                            "EXIT INTENT"
+                        );
+                    }
                 }
             }
         }
@@ -157,7 +198,6 @@ impl Pipeline {
 
             let matched = self.face_db.search(&embedding);
 
-            // Associate face with closest active track.
             let face_center = face.bbox.center();
             let face_norm = Point2D::new(
                 face_center.x / img_w as f32,
@@ -198,15 +238,15 @@ impl Pipeline {
     fn run_intent_analysis(&mut self, img_w: u32, img_h: u32) -> Vec<IntentResult> {
         let mut alerts = Vec::new();
 
-        // Collect track info to avoid borrow conflicts.
         let track_snapshot: Vec<(u64, TrackState)> = self
             .tracker
             .active_tracks()
             .map(|t| (t.id, t.state))
             .collect();
 
-        // Clone door zones to avoid borrow conflict with self.
         let door_zones = self.door_zones.clone();
+        let fps = self.fps;
+        let frame = self.frame_count;
 
         for door in &door_zones {
             for &(track_id, state) in &track_snapshot {
@@ -215,7 +255,7 @@ impl Pipeline {
                 }
                 if let Some(track) = self.tracker.get_track_mut(track_id) {
                     let signals = extract_signals_normalised(track, door, img_w, img_h);
-                    let result = self.scorer.evaluate(track, &signals, door);
+                    let result = self.scorer.evaluate(track, &signals, door, frame, fps);
 
                     if result.alert {
                         let identity =
@@ -227,9 +267,6 @@ impl Pipeline {
                             door = door.name,
                             "EXIT INTENT DETECTED"
                         );
-                    }
-
-                    if result.alert || result.score > 0.3 {
                         alerts.push(result);
                     }
                 }

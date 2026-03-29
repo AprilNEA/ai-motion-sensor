@@ -14,6 +14,14 @@ nms_iou = 0.45
 person_only = true
 # Input resolution
 input_size = 640
+# Run detection every N frames (tracking predicts on skipped frames).
+# Higher = lower latency but less responsive detection.
+detect_interval = 3
+# Downscale input to this max dimension before processing.
+# 0 = no downscale (use native resolution).
+# Tip: if your camera provides a low-res sub-stream (e.g. 640x360),
+# use that directly and set this to 0 for best performance.
+max_input_dim = 0
 
 [face]
 # Enable face recognition pipeline
@@ -44,6 +52,10 @@ confirm_frames = 15
 confirm_ratio = 0.8
 # Maximum trajectory length (frames) to keep per person
 trajectory_length = 90
+# Cooldown (seconds) after an alert fires before the same track can trigger again.
+cooldown_secs = 30.0
+# Score must drop below this to re-arm after a cooldown expires (hysteresis).
+rearm_threshold = 0.3
 
 [intent.weights]
 direction = 0.30
@@ -56,5 +68,33 @@ walking = 0.10
 # The `direction` vector points from inside toward outside.
 [[door_zones]]
 name = "front_door"
-polygon = [[0.3471, 0.3697], [0.3278, 0.0065], [0.4439, 0.0065], [0.4514, 0.4299]]
+polygon = [
+    [
+        0.3471,
+        0.3697,
+    ],
+    [
+        0.3278,
+        0.0065,
+    ],
+    [
+        0.4439,
+        0.0065,
+    ],
+    [
+        0.4514,
+        0.4299,
+    ],
+]
 direction = [0.115, -0.9934]
+
+# Door control integration (optional).
+# When exit intent is detected, the system can automatically unlock the door.
+# [door_control]
+# backend = "unifi_access"
+# host = "https://192.168.1.1:12445"
+# token = "YOUR_API_TOKEN"
+# Map door zone names to UniFi Access door names (optional).
+# If omitted, zone names are matched against UniFi door names directly.
+# [door_control.door_name_map]
+# front_door = "Door Name"

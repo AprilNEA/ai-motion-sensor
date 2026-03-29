@@ -39,6 +39,9 @@ fn main() -> Result<()> {
         )
         .init();
 
+    // Initialise rustls crypto provider (needed by ureq for HTTPS).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Initialise ffmpeg (registers all codecs/formats).
     ffmpeg_next::init()?;
 

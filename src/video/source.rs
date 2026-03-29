@@ -107,7 +107,7 @@ impl FfmpegSource {
         // Open decoder.
         let codec_params = stream.parameters();
         let codec_id = codec_params.id();
-        let mut decoder = ffmpeg::codec::Context::from_parameters(codec_params)?
+        let decoder = ffmpeg::codec::Context::from_parameters(codec_params)?
             .decoder()
             .video()?;
 

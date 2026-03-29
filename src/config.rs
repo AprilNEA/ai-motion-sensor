@@ -14,6 +14,23 @@ pub struct AppConfig {
     pub tracking: TrackingConfig,
     pub intent: IntentConfig,
     pub door_zones: Vec<DoorZoneConfig>,
+    pub door_control: Option<DoorControlConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "backend")]
+pub enum DoorControlConfig {
+    #[serde(rename = "unifi_access")]
+    UnifiAccess {
+        /// API host, e.g. "https://10.66.1.1:12445"
+        host: String,
+        /// Bearer token for the UniFi Access Developer API.
+        token: String,
+        /// Mapping from door zone name (in [door_zones]) to UniFi door name.
+        /// If omitted, zone names are used as-is.
+        #[serde(default)]
+        door_name_map: std::collections::HashMap<String, String>,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -29,6 +46,16 @@ pub struct DetectionConfig {
     pub nms_iou: f32,
     pub person_only: bool,
     pub input_size: u32,
+    /// Run detection every N frames; tracking predicts on skipped frames.
+    #[serde(default = "default_detect_interval")]
+    pub detect_interval: u64,
+    /// Downscale input to this max dimension (0 = native).
+    #[serde(default)]
+    pub max_input_dim: u32,
+}
+
+fn default_detect_interval() -> u64 {
+    1
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,7 +80,20 @@ pub struct IntentConfig {
     pub confirm_frames: usize,
     pub confirm_ratio: f32,
     pub trajectory_length: usize,
+    /// Cooldown (seconds) after alert before the same track can re-trigger.
+    #[serde(default = "default_cooldown")]
+    pub cooldown_secs: f64,
+    /// Score must drop below this to re-arm after cooldown (hysteresis).
+    #[serde(default = "default_rearm")]
+    pub rearm_threshold: f32,
     pub weights: IntentWeights,
+}
+
+fn default_cooldown() -> f64 {
+    30.0
+}
+fn default_rearm() -> f32 {
+    0.3
 }
 
 #[derive(Debug, Clone, Deserialize)]

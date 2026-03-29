@@ -63,18 +63,16 @@ build: ## Build in release mode
 test: ## Run tests
 	cargo test
 
-run: ## Run pipeline (usage: make run INPUT=<file|dir|rtsp_url> [WIDTH=1280] [HEIGHT=720] [FPS=30])
+run: ## Run pipeline (usage: make run INPUT=<file|dir|rtsp_url> [FPS=30])
 	@if [ -z "$(INPUT)" ]; then \
 		echo "Usage:"; \
 		echo "  make run INPUT=video.mp4           # video file"; \
 		echo "  make run INPUT=frames/             # image directory"; \
-		echo "  make run INPUT=rtsps://user:pass@ip:554/stream  # RTSP stream (auto-probe)"; \
+		echo "  make run INPUT=rtsps://user:pass@ip:554/stream  # RTSP stream"; \
 		exit 1; \
 	fi
 	cargo run --release -- \
 		-i "$(INPUT)" \
-		--width $(or $(WIDTH),1280) \
-		--height $(or $(HEIGHT),720) \
 		$(if $(FPS),--fps $(FPS),)
 
 # ---------------------------------------------------------------------------

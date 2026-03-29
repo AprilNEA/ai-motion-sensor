@@ -141,6 +141,14 @@ impl ByteTracker {
             .filter(|t| t.state == TrackState::Active)
     }
 
+    /// Predict-only step (no detections). Used on skipped frames to advance
+    /// Kalman filters without new measurements.
+    pub fn predict_only(&mut self) {
+        for track in &mut self.tracks {
+            track.predict(&self.kf);
+        }
+    }
+
     /// Get mutable reference to a track by id.
     pub fn get_track_mut(&mut self, id: u64) -> Option<&mut Track> {
         self.tracks.iter_mut().find(|t| t.id == id)
