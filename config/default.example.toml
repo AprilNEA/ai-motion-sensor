@@ -95,7 +95,7 @@ direction = [0.115, -0.9934]
 # backend = "unifi_access"
 # host = "https://192.168.1.1:12445"
 # token = "YOUR_API_TOKEN"
-# Map door zone names to UniFi Access door names (optional).
-# If omitted, zone names are matched against UniFi door names directly.
+# # Map door zone names to UniFi Access door names (optional).
+# # If omitted, zone names are matched against UniFi door names directly.
 # [door_control.door_name_map]
 # front_door = "Door Name"

@@ -14,7 +14,7 @@ pub enum DoorLockState {
 ///
 /// Implementors connect to a door access control system (e.g. UniFi Access)
 /// and provide remote lock/unlock capabilities.
-pub trait DoorController: Send {
+pub trait DoorController: Send + Sync {
     /// Unlock the door. Returns immediately after the command is accepted.
     fn unlock(&self, door_name: &str) -> Result<()>;
 

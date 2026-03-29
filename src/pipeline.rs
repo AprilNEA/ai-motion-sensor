@@ -2,6 +2,7 @@ use anyhow::Result;
 use image::{DynamicImage, GenericImageView};
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::analysis::face_db::FaceDatabase;
 use crate::analysis::intent::{ExitIntentScorer, IntentResult};
@@ -30,8 +31,8 @@ pub struct Pipeline {
     detect_interval: u64,
     max_input_dim: u32,
     fps: f64,
-    /// Door controller + zone-name-to-door-name mapping.
-    door_ctrl: Option<(Box<dyn DoorController>, HashMap<String, String>)>,
+    /// Door controller (Arc for thread-safe sharing) + zone-name-to-door-name mapping.
+    door_ctrl: Option<(Arc<dyn DoorController + Sync>, HashMap<String, String>)>,
 }
 
 /// Summary returned after processing a single frame.
@@ -64,7 +65,7 @@ impl Pipeline {
         let max_input_dim = config.detection.max_input_dim;
 
         // Door controller.
-        let door_ctrl: Option<(Box<dyn DoorController>, HashMap<String, String>)> =
+        let door_ctrl: Option<(Arc<dyn DoorController + Sync>, HashMap<String, String>)> =
             match &config.door_control {
                 Some(DoorControlConfig::UnifiAccess {
                     host,
@@ -74,7 +75,7 @@ impl Pipeline {
                     match UnifiAccessController::new(host, token) {
                         Ok(ctrl) => {
                             tracing::info!(host, "UniFi Access door controller connected");
-                            Some((Box::new(ctrl), door_name_map.clone()))
+                            Some((Arc::new(ctrl), door_name_map.clone()))
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to connect door controller, continuing without");
@@ -298,19 +299,22 @@ impl Pipeline {
                             "EXIT INTENT DETECTED"
                         );
 
-                        // Trigger door unlock.
+                        // Trigger door unlock in background thread (non-blocking).
                         if let Some((ctrl, name_map)) = &self.door_ctrl {
                             let door_name = name_map
                                 .get(&door.name)
                                 .cloned()
                                 .unwrap_or_else(|| door.name.clone());
-                            if let Err(e) = ctrl.unlock(&door_name) {
-                                tracing::error!(
-                                    door = %door_name,
-                                    error = %e,
-                                    "door unlock failed"
-                                );
-                            }
+                            let ctrl = Arc::clone(ctrl);
+                            std::thread::spawn(move || {
+                                if let Err(e) = ctrl.unlock(&door_name) {
+                                    tracing::error!(
+                                        door = %door_name,
+                                        error = %e,
+                                        "door unlock failed"
+                                    );
+                                }
+                            });
                         }
 
                         alerts.push(result);
