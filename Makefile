@@ -17,41 +17,17 @@ help: ## Show this help
 setup: deps models build ## Full one-click setup: install deps + download models + build
 	@echo "\n✅ Setup complete. Run 'make run INPUT=<video>' to start."
 
-deps: ## Install system & Python dependencies
+deps: ## Install system dependencies
 	@echo "==> Checking system dependencies..."
 	@command -v ffmpeg >/dev/null 2>&1 || { echo "Installing ffmpeg..."; brew install ffmpeg; }
-	@command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 not found"; exit 1; }
-	@python3 -c "import ultralytics" 2>/dev/null || { echo "Installing ultralytics..."; pip3 install ultralytics; }
 	@echo "    All dependencies OK."
 
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
 
-models: $(YOLO_MODEL) $(SCRFD_MODEL) $(ARCFACE_MODEL) ## Download all ONNX models
-	@echo "==> All models ready:"
-	@ls -lh $(MODELS_DIR)/*.onnx
-
-$(YOLO_MODEL):
-	@echo "==> Exporting YOLO11s to ONNX..."
-	@mkdir -p $(MODELS_DIR)
-	@python3 -c "\
-from ultralytics import YOLO; \
-YOLO('yolo11s.pt').export(format='onnx', imgsz=640, simplify=True)"
-	@mv yolo11s.onnx $@
-	@echo "    -> $@"
-
-$(SCRFD_MODEL):
-	@echo "==> Downloading SCRFD 10g..."
-	@mkdir -p $(MODELS_DIR)
-	@curl -L --progress-bar -o $@ "$(INSIGHTFACE_BASE)/det_10g.onnx"
-	@echo "    -> $@"
-
-$(ARCFACE_MODEL):
-	@echo "==> Downloading ArcFace w600k_r50..."
-	@mkdir -p $(MODELS_DIR)
-	@curl -L --progress-bar -o $@ "$(INSIGHTFACE_BASE)/w600k_r50.onnx"
-	@echo "    -> $@"
+models: ## Download all ONNX models
+	@bash scripts/download_models.sh
 
 # ---------------------------------------------------------------------------
 # Build & run
