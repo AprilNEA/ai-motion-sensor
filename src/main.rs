@@ -27,15 +27,7 @@ struct Cli {
     #[arg(short, long, default_value = "config/default.toml")]
     config: String,
 
-    /// Override frame width (only for video files; RTSP is auto-probed).
-    #[arg(long, default_value = "1280")]
-    width: u32,
-
-    /// Override frame height (only for video files; RTSP is auto-probed).
-    #[arg(long, default_value = "720")]
-    height: u32,
-
-    /// Override FPS (applies to all sources; RTSP auto-probed if omitted).
+    /// Override FPS (applies to all sources; auto-detected if omitted).
     #[arg(long)]
     fps: Option<f64>,
 }
@@ -47,6 +39,9 @@ fn main() -> Result<()> {
         )
         .init();
 
+    // Initialise ffmpeg (registers all codecs/formats).
+    ffmpeg_next::init()?;
+
     let cli = Cli::parse();
 
     let config = AppConfig::load(&cli.config)
@@ -55,23 +50,20 @@ fn main() -> Result<()> {
     // Create video source BEFORE pipeline to avoid potential fd interference
     // from ONNX Runtime model loading.
     let mut source: Box<dyn FrameSource> = if is_rtsp_url(&cli.input) {
-        // ---- RTSP / RTSPS stream (auto-probe resolution) ----
         tracing::info!(url = %cli.input, "using RTSP stream source");
-        Box::new(RtspSource::new(&cli.input, cli.fps)?)
+        Box::new(RtspSource::new(&cli.input)?)
     } else {
         let input_path = Path::new(&cli.input);
         if input_path.is_dir() {
             tracing::info!(dir = %input_path.display(), "using image directory source");
             Box::new(ImageDirSource::new(input_path, cli.fps.unwrap_or(30.0))?)
         } else {
-            let fps = cli.fps.unwrap_or(30.0);
             tracing::info!(file = %input_path.display(), "using ffmpeg video source");
-            Box::new(FfmpegSource::new(&cli.input, cli.width, cli.height, fps)?)
+            Box::new(FfmpegSource::new(&cli.input)?)
         }
     };
 
     let mut pipeline = Pipeline::new(config)?;
-
     pipeline.run(source.as_mut())?;
 
     tracing::info!("done");

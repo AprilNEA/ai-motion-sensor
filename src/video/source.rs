@@ -1,8 +1,6 @@
 use anyhow::{Context, Result};
 use image::DynamicImage;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 
 /// Abstraction over different video input sources.
 pub trait FrameSource {
@@ -64,71 +62,148 @@ impl FrameSource for ImageDirSource {
 }
 
 // ---------------------------------------------------------------------------
-// FFmpeg pipe source (video file → raw RGB frames)
+// FFmpeg in-process source (video file, RTSP/RTSPS, any URL ffmpeg supports)
 // ---------------------------------------------------------------------------
 
-/// Decodes a video file by spawning `ffmpeg` and reading raw RGB24 frames from
-/// its stdout.  This avoids any Rust FFmpeg binding dependency.
+use ffmpeg_next as ffmpeg;
+
+/// Decode video from any source ffmpeg supports (file, RTSP, RTSPS, …)
+/// entirely in-process — no subprocess pipes.
 pub struct FfmpegSource {
-    pub(super) child: Child,
-    pub(super) width: u32,
-    pub(super) height: u32,
-    pub(super) fps: f64,
-    pub(super) buf: Vec<u8>,
+    input: ffmpeg::format::context::Input,
+    decoder: ffmpeg::codec::decoder::Video,
+    scaler: ffmpeg::software::scaling::Context,
+    stream_idx: usize,
+    fps: f64,
+    width: u32,
+    height: u32,
+    // Reusable buffers to avoid per-frame allocation.
+    decoded_frame: ffmpeg::frame::Video,
+    rgb_frame: ffmpeg::frame::Video,
 }
 
 impl FfmpegSource {
-    pub fn new(video_path: &str, width: u32, height: u32, fps: f64) -> Result<Self> {
-        let child = Command::new("ffmpeg")
-            .args([
-                "-i",
-                video_path,
-                "-map", "0:v:0",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "rgb24",
-                "-s",
-                &format!("{width}x{height}"),
-                "-r",
-                &format!("{fps}"),
-                "-loglevel",
-                "error",
-                "pipe:1",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("failed to spawn ffmpeg – is it installed?")?;
+    pub fn new(path: &str) -> Result<Self> {
+        // Set RTSP options for streams.
+        let mut opts = ffmpeg::Dictionary::new();
+        if is_rtsp_url(path) {
+            opts.set("rtsp_transport", "tcp");
+            opts.set("fflags", "nobuffer");
+        }
 
-        let frame_bytes = (width * height * 3) as usize;
-        Ok(Self {
-            child,
+        let input = ffmpeg::format::input_with_dictionary(&path, opts)
+            .with_context(|| format!("failed to open input: {path}"))?;
+
+        // Find the best video stream.
+        let stream = input
+            .streams()
+            .best(ffmpeg::media::Type::Video)
+            .context("no video stream found")?;
+        let stream_idx = stream.index();
+
+        let fps = f64::from(stream.avg_frame_rate());
+        let fps = if fps > 0.0 { fps } else { 30.0 };
+
+        // Open decoder.
+        let codec_params = stream.parameters();
+        let codec_id = codec_params.id();
+        let mut decoder = ffmpeg::codec::Context::from_parameters(codec_params)?
+            .decoder()
+            .video()?;
+
+        let width = decoder.width();
+        let height = decoder.height();
+
+        // Scaler: source pixel format → RGB24.
+        let scaler = ffmpeg::software::scaling::Context::get(
+            decoder.format(),
+            width,
+            height,
+            ffmpeg::format::Pixel::RGB24,
+            width,
+            height,
+            ffmpeg::software::scaling::Flags::BILINEAR,
+        )?;
+
+        tracing::info!(
+            path,
             width,
             height,
             fps,
-            buf: vec![0u8; frame_bytes],
+            codec = ?codec_id,
+            "video source opened"
+        );
+
+        Ok(Self {
+            input,
+            decoder,
+            scaler,
+            stream_idx,
+            fps,
+            width,
+            height,
+            decoded_frame: ffmpeg::frame::Video::empty(),
+            rgb_frame: ffmpeg::frame::Video::empty(),
         })
     }
 }
 
 impl FrameSource for FfmpegSource {
     fn next_frame(&mut self) -> Result<Option<DynamicImage>> {
-        let stdout = self
-            .child
-            .stdout
-            .as_mut()
-            .context("ffmpeg stdout not captured")?;
+        // Feed packets to the decoder until we get a frame.
+        loop {
+            // Try to receive a decoded frame first (there might be buffered ones).
+            if self.decoder.receive_frame(&mut self.decoded_frame).is_ok() {
+                // Convert to RGB24.
+                self.scaler.run(&self.decoded_frame, &mut self.rgb_frame)?;
+                let data = self.rgb_frame.data(0);
+                let stride = self.rgb_frame.stride(0);
+                let w = self.width as usize;
+                let h = self.height as usize;
 
-        match stdout.read_exact(&mut self.buf) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e.into()),
+                // Copy rows (stride may be wider than width*3).
+                let mut rgb_buf = Vec::with_capacity(w * h * 3);
+                for y in 0..h {
+                    let row_start = y * stride;
+                    rgb_buf.extend_from_slice(&data[row_start..row_start + w * 3]);
+                }
+
+                let img = image::RgbImage::from_raw(self.width, self.height, rgb_buf)
+                    .context("failed to construct RGB image")?;
+                return Ok(Some(DynamicImage::ImageRgb8(img)));
+            }
+
+            // Send the next packet from the video stream to the decoder.
+            match self.input.packets().next() {
+                Some((stream, packet)) => {
+                    if stream.index() == self.stream_idx {
+                        self.decoder.send_packet(&packet)?;
+                    }
+                    // Packets from other streams (audio, etc.) are silently skipped.
+                }
+                None => {
+                    // EOF – flush the decoder.
+                    self.decoder.send_eof()?;
+                    if self.decoder.receive_frame(&mut self.decoded_frame).is_ok() {
+                        self.scaler.run(&self.decoded_frame, &mut self.rgb_frame)?;
+                        let data = self.rgb_frame.data(0);
+                        let stride = self.rgb_frame.stride(0);
+                        let w = self.width as usize;
+                        let h = self.height as usize;
+                        let mut rgb_buf = Vec::with_capacity(w * h * 3);
+                        for y in 0..h {
+                            let row_start = y * stride;
+                            rgb_buf.extend_from_slice(&data[row_start..row_start + w * 3]);
+                        }
+                        let img =
+                            image::RgbImage::from_raw(self.width, self.height, rgb_buf)
+                                .context("failed to construct RGB image")?;
+                        return Ok(Some(DynamicImage::ImageRgb8(img)));
+                    }
+                    return Ok(None);
+                }
+            }
         }
-
-        let img = image::RgbImage::from_raw(self.width, self.height, self.buf.clone())
-            .context("failed to construct image from raw bytes")?;
-        Ok(Some(DynamicImage::ImageRgb8(img)))
     }
 
     fn fps(&self) -> f64 {
@@ -136,136 +211,72 @@ impl FrameSource for FfmpegSource {
     }
 }
 
-impl Drop for FfmpegSource {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-    }
-}
-
 // ---------------------------------------------------------------------------
-// RTSP / RTSPS stream source
+// RTSP wrapper with auto-reconnect
 // ---------------------------------------------------------------------------
 
-/// Connects to an RTSP/RTSPS stream via ffmpeg.
-///
-/// Stream resolution and FPS are auto-probed with `ffprobe` so the caller does
-/// not need to specify them manually.
+/// RTSP/RTSPS source with automatic reconnection on stream drop.
 pub struct RtspSource {
     url: String,
-    child: Option<Child>,
-    width: u32,
-    height: u32,
+    inner: Option<FfmpegSource>,
     fps: f64,
-    buf: Vec<u8>,
     max_retries: u32,
 }
 
-/// Stream metadata obtained from `ffprobe`.
-#[derive(Debug)]
-pub struct StreamInfo {
-    pub width: u32,
-    pub height: u32,
-    pub fps: f64,
-}
-
 impl RtspSource {
-    pub fn new(url: &str, fps_override: Option<f64>) -> Result<Self> {
-        let info = probe_stream(url)?;
-        let fps = fps_override.unwrap_or(info.fps);
-        tracing::info!(
-            url,
-            width = info.width,
-            height = info.height,
-            fps,
-            "connecting to RTSP stream"
-        );
-
-        let child = Self::spawn_ffmpeg(url)?;
-        let frame_bytes = (info.width * info.height * 3) as usize;
-
+    pub fn new(url: &str) -> Result<Self> {
+        let inner = FfmpegSource::new(url)?;
+        let fps = inner.fps();
         Ok(Self {
             url: url.to_string(),
-            child: Some(child),
-            width: info.width,
-            height: info.height,
+            inner: Some(inner),
             fps,
-            buf: vec![0u8; frame_bytes],
             max_retries: 10,
         })
-    }
-
-    fn spawn_ffmpeg(url: &str) -> Result<Child> {
-        Command::new("ffmpeg")
-            .args([
-                "-rtsp_transport", "tcp",
-                "-fflags", "nobuffer",
-                "-i", url,
-                "-map", "0:v:0",
-                "-f", "rawvideo",
-                "-pix_fmt", "rgb24",
-                "-loglevel", "error",
-                "pipe:1",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("failed to spawn ffmpeg for RTSP stream")
-    }
-
-    /// Kill the current ffmpeg process and reconnect.
-    fn reconnect(&mut self) -> Result<()> {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        tracing::warn!(url = %self.url, "reconnecting to RTSP stream");
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        self.child = Some(Self::spawn_ffmpeg(&self.url)?);
-        Ok(())
     }
 }
 
 impl FrameSource for RtspSource {
     fn next_frame(&mut self) -> Result<Option<DynamicImage>> {
         for attempt in 0..=self.max_retries {
-            let child = match &mut self.child {
-                Some(c) => c,
-                None => {
-                    self.reconnect()?;
-                    self.child.as_mut().unwrap()
-                }
-            };
-
-            let stdout = match child.stdout.as_mut() {
+            let source = match &mut self.inner {
                 Some(s) => s,
                 None => {
-                    self.reconnect()?;
-                    continue;
+                    tracing::warn!(url = %self.url, attempt, "reconnecting to RTSP stream");
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    match FfmpegSource::new(&self.url) {
+                        Ok(s) => {
+                            self.inner = Some(s);
+                            self.inner.as_mut().unwrap()
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "reconnect failed");
+                            continue;
+                        }
+                    }
                 }
             };
 
-            match stdout.read_exact(&mut self.buf) {
-                Ok(()) => {
-                    let img = image::RgbImage::from_raw(
-                        self.width, self.height, self.buf.clone(),
-                    )
-                    .context("failed to construct image from raw bytes")?;
-                    return Ok(Some(DynamicImage::ImageRgb8(img)));
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            match source.next_frame() {
+                Ok(Some(frame)) => return Ok(Some(frame)),
+                Ok(None) => {
+                    // Stream ended / dropped.
+                    self.inner = None;
                     if attempt < self.max_retries {
-                        tracing::warn!(
-                            attempt = attempt + 1,
-                            max = self.max_retries,
-                            "RTSP stream dropped, reconnecting"
-                        );
-                        self.reconnect()?;
+                        tracing::warn!(attempt = attempt + 1, "RTSP stream dropped");
                         continue;
                     }
                     tracing::error!("RTSP stream lost after {} retries", self.max_retries);
                     return Ok(None);
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => {
+                    self.inner = None;
+                    if attempt < self.max_retries {
+                        tracing::warn!(attempt = attempt + 1, error = %e, "RTSP decode error");
+                        continue;
+                    }
+                    return Err(e);
+                }
             }
         }
 
@@ -277,60 +288,12 @@ impl FrameSource for RtspSource {
     }
 }
 
-impl Drop for RtspSource {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 /// Return true if the input looks like an RTSP/RTSPS URL.
 pub fn is_rtsp_url(input: &str) -> bool {
     let lower = input.to_ascii_lowercase();
     lower.starts_with("rtsp://") || lower.starts_with("rtsps://")
-}
-
-/// Use `ffprobe` to discover the resolution and frame rate of a stream / file.
-pub fn probe_stream(url: &str) -> Result<StreamInfo> {
-    let output = Command::new("ffprobe")
-        .args([
-            "-rtsp_transport", "tcp",
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,r_frame_rate",
-            "-of", "csv=p=0",
-            url,
-        ])
-        .output()
-        .context("failed to run ffprobe – is ffmpeg installed?")?;
-
-    anyhow::ensure!(
-        output.status.success(),
-        "ffprobe failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<&str> = stdout.trim().split(',').collect();
-    anyhow::ensure!(
-        parts.len() >= 3,
-        "unexpected ffprobe output: {stdout}"
-    );
-
-    let width: u32 = parts[0].parse().context("bad width from ffprobe")?;
-    let height: u32 = parts[1].parse().context("bad height from ffprobe")?;
-
-    // r_frame_rate is a fraction like "30/1" or "30000/1001".
-    let fps = parse_frame_rate(parts[2]).unwrap_or(30.0);
-
-    Ok(StreamInfo { width, height, fps })
-}
-
-fn parse_frame_rate(s: &str) -> Option<f64> {
-    let (num, den) = s.split_once('/')?;
-    let n: f64 = num.trim().parse().ok()?;
-    let d: f64 = den.trim().parse().ok()?;
-    if d == 0.0 { return None; }
-    Some(n / d)
 }

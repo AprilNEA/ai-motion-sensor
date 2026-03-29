@@ -9,6 +9,9 @@ description = "AI-powered motion sensor with exit intent detection for Apple Sil
 ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
 ndarray = "0.17"
 
+# Video decoding (in-process, no subprocess pipes)
+ffmpeg-next = "7"
+
 # Image processing
 image = "0.25"
 
