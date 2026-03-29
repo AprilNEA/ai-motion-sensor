@@ -10,7 +10,7 @@ ort = { version = "2.0.0-rc.12", features = ["ndarray", "coreml"] }
 ndarray = "0.17"
 
 # Video decoding (in-process, no subprocess pipes)
-ffmpeg-next = "7"
+ffmpeg-next = "8.1"
 
 # Image processing
 image = "0.25"
